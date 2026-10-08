@@ -18,7 +18,10 @@ fn main() {
     }
     let mut av = AvProbe::new();
     let started = Instant::now();
-    println!("t\tidle_s\tlocked\tchanged_ratio\tframes\tmic\tcamera");
+    println!(
+        "{:>5} {:>7} {:<7} {:>13} {:>7} {:<6} {}",
+        "t", "idle_s", "locked", "changed_ratio", "frames", "mic", "camera"
+    );
     for t in 1..=seconds {
         std::thread::sleep(Duration::from_secs(1));
         if motion.displays_changed() {
@@ -27,7 +30,7 @@ fn main() {
         }
         let state = av.read();
         println!(
-            "{t}\t{:.1}\t{}\t{:.3}\t{}\t{}\t{}",
+            "{t:>5} {:>7.1} {:<7} {:>13.3} {:>7} {:<6} {}",
             input_idle_seconds(),
             is_screen_locked(),
             motion.take_changed_ratio(),
