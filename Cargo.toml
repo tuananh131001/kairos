@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kairos-core",
+    "crates/kairos-ipc",
+    "crates/kairos-store",
+    "crates/kairos-platform-macos",
+    "crates/kairosd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+[workspace.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "sync", "time", "signal"] }
+libc = "0.2"
+tempfile = "3"
+kairos-core = { path = "crates/kairos-core" }
+kairos-ipc = { path = "crates/kairos-ipc" }
+kairos-store = { path = "crates/kairos-store" }
+kairos-platform-macos = { path = "crates/kairos-platform-macos" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release.build-override]
+strip = false
+opt-level = 0

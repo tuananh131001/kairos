@@ -1,0 +1,10 @@
+[package]
+name = "kairos-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kairos-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

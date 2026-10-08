@@ -1,0 +1,12 @@
+[package]
+name = "kairos-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kairos-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "11"
+core-foundation = "0.10"

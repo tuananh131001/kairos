@@ -1,0 +1,1 @@
+{"v":1,"type":"Reply","id":4,"ok":false,"error":{"code":"validation","message":"Invalid settings.","fields":[{"field":"work_minutes","message":"Work duration must be between 1 and 240 minutes."}]}}

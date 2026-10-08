@@ -1,0 +1,8 @@
+/target
+/build
+/apps/macos/Kairos.xcodeproj
+/apps/macos/.build
+/apps/macos/.swiftpm
+.DS_Store
+*.xcuserstate
+xcuserdata/
