@@ -12,6 +12,8 @@ final class AppModel {
     private(set) lazy var overlay = BreakOverlayController(model: self)
     private(set) lazy var gate = PermissionGateController(model: self)
     private var started = false
+    private var trackingMenus = 0
+    private var menuObservers: [NSObjectProtocol] = []
 
     func start() {
         guard !started else { return }
@@ -34,7 +36,25 @@ final class AppModel {
             self?.store.notificationsDenied = !authorized
         }
         notifier.setup()
+        observeMenuTracking()
         client.start()
+    }
+
+    private func observeMenuTracking() {
+        let center = NotificationCenter.default
+        menuObservers = [
+            center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.menuTrackingChanged(by: 1) }
+            },
+            center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.menuTrackingChanged(by: -1) }
+            },
+        ]
+    }
+
+    private func menuTrackingChanged(by delta: Int) {
+        trackingMenus = max(0, trackingMenus + delta)
+        store.menuOpen = trackingMenus > 0
     }
 
     func handle(_ event: ServerEvent) {

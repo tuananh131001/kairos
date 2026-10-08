@@ -7,7 +7,8 @@ struct MenuContent: View {
     private let meetingPresets: [PausePreset] = [.m30, .h2, .h4]
 
     var body: some View {
-        if store.showMeetingFallback {
+        let menu = store.menu
+        if menu.meetingFallback {
             Text("🎙 Meeting detected")
             ForEach(meetingPresets, id: \.self) { preset in
                 Button("Pause \(Formatting.presetTitle(preset))") {
@@ -16,9 +17,9 @@ struct MenuContent: View {
             }
             Divider()
         }
-        Text(Formatting.statusLine(state: store.state, connected: store.connected))
-        Text(Formatting.activityLine(store.state))
-        Text(Formatting.todayLine(store.state))
+        Text(menu.status)
+        Text(menu.activity)
+        Text(menu.today)
         Divider()
         Menu("Pause for…") {
             ForEach(PausePreset.allCases, id: \.self) { preset in
@@ -27,11 +28,11 @@ struct MenuContent: View {
                 }
             }
         }
-        .disabled(!store.connected)
+        .disabled(!menu.connected)
         Button("Resume") {
             model.resume()
         }
-        .disabled(!store.connected || store.state?.phase != .paused)
+        .disabled(!menu.canResume)
         Divider()
         SettingsLink {
             Text("Settings…")
@@ -48,12 +49,12 @@ struct MenuBarLabel: View {
     let store: DaemonStore
 
     var body: some View {
-        let state = store.connected ? store.state : nil
+        let label = store.label
         Image(nsImage: MenuBarIcon.render(
-            title: Formatting.menuBarTitle(state: store.state, connected: store.connected),
-            progress: (state?.loadPercent ?? 0) / 100,
-            alert: Formatting.isAlert(state: state),
-            badge: store.showMeetingBadge
+            title: label.title,
+            progress: label.progress,
+            alert: label.alert,
+            badge: label.badge
         ))
     }
 }

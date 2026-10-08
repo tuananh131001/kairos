@@ -1,16 +1,47 @@
 import Foundation
 import Observation
 
+struct MenuSnapshot: Equatable {
+    var status: String
+    var activity: String
+    var today: String
+    var connected: Bool
+    var canResume: Bool
+    var meetingFallback: Bool
+}
+
+struct LabelSnapshot: Equatable {
+    var title: String
+    var progress: Double
+    var alert: Bool
+    var badge: Bool
+}
+
 @Observable
 final class DaemonStore {
-    var connected = false
-    var state: DaemonState?
+    var connected = false { didSet { refreshSnapshots() } }
+    var state: DaemonState? { didSet { refreshSnapshots() } }
     var settings: KairosSettings?
     var settingsErrors: [String: String] = [:]
     var breakText = ""
     var overlayVisible = false
-    var meetingNudge = false
-    var notificationsDenied = false
+    var meetingNudge = false { didSet { refreshSnapshots() } }
+    var notificationsDenied = false { didSet { refreshSnapshots() } }
+    var menuOpen = false { didSet { refreshSnapshots() } }
+    private(set) var menu = MenuSnapshot(
+        status: Formatting.statusLine(state: nil, connected: false),
+        activity: Formatting.activityLine(nil),
+        today: Formatting.todayLine(nil),
+        connected: false,
+        canResume: false,
+        meetingFallback: false
+    )
+    private(set) var label = LabelSnapshot(
+        title: Formatting.menuBarTitle(state: nil, connected: false),
+        progress: 0,
+        alert: false,
+        badge: false
+    )
 
     var overlayRemaining: Int {
         state?.breakRemainingS ?? breakStartRemaining
@@ -90,5 +121,30 @@ final class DaemonStore {
             overlayVisible = false
         }
         meetingNudge = newState.meetingActive
+    }
+
+    private func refreshSnapshots() {
+        guard !menuOpen else { return }
+        let liveState = connected ? state : nil
+        let nextLabel = LabelSnapshot(
+            title: Formatting.menuBarTitle(state: state, connected: connected),
+            progress: Double(Formatting.percent(liveState?.loadPercent ?? 0)) / 100,
+            alert: Formatting.isAlert(state: liveState),
+            badge: showMeetingBadge
+        )
+        if label != nextLabel {
+            label = nextLabel
+        }
+        let nextMenu = MenuSnapshot(
+            status: Formatting.statusLine(state: state, connected: connected),
+            activity: Formatting.activityLine(state),
+            today: Formatting.todayLine(state),
+            connected: connected,
+            canResume: connected && state?.phase == .paused,
+            meetingFallback: showMeetingFallback
+        )
+        if menu != nextMenu {
+            menu = nextMenu
+        }
     }
 }

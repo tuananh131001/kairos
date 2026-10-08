@@ -79,6 +79,40 @@ final class DaemonStoreTests: XCTestCase {
         XCTAssertFalse(store.overlayVisible)
     }
 
+    func testMenuSnapshotFollowsStateWhileClosed() {
+        let store = DaemonStore()
+        store.setConnected(true)
+        store.apply(.state(makeState(breakIn: 1800)))
+        XCTAssertEqual(store.menu.status, "Break in 30:00")
+        store.apply(.state(makeState(breakIn: 1799)))
+        XCTAssertEqual(store.menu.status, "Break in 29:59")
+        XCTAssertEqual(store.label.title, "40%")
+    }
+
+    func testMenuSnapshotFreezesWhileOpenAndCatchesUpOnClose() {
+        let store = DaemonStore()
+        store.setConnected(true)
+        store.apply(.state(makeState(load: 40, breakIn: 1800)))
+        store.menuOpen = true
+        store.apply(.state(makeState(phase: .paused, load: 41, breakIn: nil, pausedUntil: 0)))
+        XCTAssertEqual(store.menu.status, "Break in 30:00")
+        XCTAssertFalse(store.menu.canResume)
+        XCTAssertEqual(store.label.title, "40%")
+        store.menuOpen = false
+        XCTAssertTrue(store.menu.canResume)
+        XCTAssertEqual(store.label.title, "⏸ 41%")
+    }
+
+    func testSnapshotsIgnoreSubPercentLoadChanges() {
+        let store = DaemonStore()
+        store.setConnected(true)
+        store.apply(.state(makeState(load: 40.2)))
+        let label = store.label
+        store.apply(.state(makeState(load: 40.7)))
+        XCTAssertEqual(store.label, label)
+        XCTAssertEqual(store.label.progress, 0.4, accuracy: 0.0001)
+    }
+
     func testBackoffDoublesToFiveSeconds() {
         var backoff = Backoff()
         XCTAssertEqual((0..<6).map { _ in backoff.next() }, [0.5, 1, 2, 4, 5, 5])
