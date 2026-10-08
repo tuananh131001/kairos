@@ -19,8 +19,8 @@ fn main() {
     let mut av = AvProbe::new();
     let started = Instant::now();
     println!(
-        "{:>5} {:>7} {:<7} {:>13} {:>7} {:<6} {}",
-        "t", "idle_s", "locked", "changed_ratio", "frames", "mic", "camera"
+        "{:>5} {:>7} {:<7} {:>13} {:>7} {:<6} camera",
+        "t", "idle_s", "locked", "changed_ratio", "frames", "mic"
     );
     for t in 1..=seconds {
         std::thread::sleep(Duration::from_secs(1));
