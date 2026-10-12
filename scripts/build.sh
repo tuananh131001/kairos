@@ -72,8 +72,8 @@ else
   lipo -create -output "$APP/Contents/MacOS/Kairos" "${SLICES[@]}"
   sed -e 's/$(EXECUTABLE_NAME)/Kairos/' \
       -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/com.kairos.app/' \
-      -e 's/$(MARKETING_VERSION)/0.1.0/' \
-      -e 's/$(CURRENT_PROJECT_VERSION)/1/' \
+      -e 's/$(MARKETING_VERSION)/0.2.0/' \
+      -e 's/$(CURRENT_PROJECT_VERSION)/2/' \
       -e 's/$(MACOSX_DEPLOYMENT_TARGET)/14.0/' \
       "$APP_DIR/Kairos/Resources/Info.plist" > "$APP/Contents/Info.plist"
   cp "$APP_DIR/Kairos/Resources/AppIcon.icns" "$APP/Contents/Resources/"
