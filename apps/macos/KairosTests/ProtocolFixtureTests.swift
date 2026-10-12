@@ -13,7 +13,7 @@ final class ProtocolFixtureTests: XCTestCase {
         let names = try FileManager.default.contentsOfDirectory(atPath: fixturesURL.path)
             .filter { $0.hasSuffix(".json") }
             .sorted()
-        XCTAssertGreaterThanOrEqual(names.count, 18)
+        XCTAssertGreaterThanOrEqual(names.count, 19)
         return try names.map { ($0, try Data(contentsOf: fixturesURL.appendingPathComponent($0))) }
     }
 

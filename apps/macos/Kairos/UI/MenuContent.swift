@@ -29,6 +29,11 @@ struct MenuContent: View {
             }
         }
         .disabled(!menu.connected)
+        Button(menu.startBreakTitle) {
+            model.startBreak()
+        }
+        .keyboardShortcut("b")
+        .disabled(!menu.canStartBreak)
         Button("Resume") {
             model.resume()
         }

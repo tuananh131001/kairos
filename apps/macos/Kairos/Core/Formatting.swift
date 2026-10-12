@@ -59,6 +59,10 @@ enum Formatting {
         }
     }
 
+    static func startBreakTitle(state: DaemonState?) -> String {
+        state?.phase == .paused ? "Start break (in paused)" : "Start break"
+    }
+
     static func activityLine(_ state: DaemonState?) -> String {
         switch state?.activity {
         case .active: return "Active"

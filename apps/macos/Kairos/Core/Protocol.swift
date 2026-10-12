@@ -206,6 +206,7 @@ enum ClientRequest: Equatable {
     case pause(preset: PausePreset, source: PauseSource)
     case resume
     case postponeBreak
+    case startBreak
     case restartCapture
     case shutdown
 }
@@ -241,6 +242,7 @@ struct ClientMessage: Codable, Equatable {
             )
         case "Resume": request = .resume
         case "PostponeBreak": request = .postponeBreak
+        case "StartBreak": request = .startBreak
         case "RestartCapture": request = .restartCapture
         case "Shutdown": request = .shutdown
         default:
@@ -265,6 +267,7 @@ struct ClientMessage: Codable, Equatable {
             try c.encode(source, forKey: .source)
         case .resume: try c.encode("Resume", forKey: .type)
         case .postponeBreak: try c.encode("PostponeBreak", forKey: .type)
+        case .startBreak: try c.encode("StartBreak", forKey: .type)
         case .restartCapture: try c.encode("RestartCapture", forKey: .type)
         case .shutdown: try c.encode("Shutdown", forKey: .type)
         }

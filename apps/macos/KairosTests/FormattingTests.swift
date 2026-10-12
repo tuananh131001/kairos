@@ -25,6 +25,13 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(Formatting.hoursMinutes(59), "0:00")
     }
 
+    func testStartBreakTitle() {
+        XCTAssertEqual(Formatting.startBreakTitle(state: makeState()), "Start break")
+        XCTAssertEqual(Formatting.startBreakTitle(state: makeState(load: 100, postponed: true)), "Start break")
+        XCTAssertEqual(Formatting.startBreakTitle(state: makeState(phase: .paused, breakIn: nil)), "Start break (in paused)")
+        XCTAssertEqual(Formatting.startBreakTitle(state: nil), "Start break")
+    }
+
     func testStatusLines() {
         let utc = TimeZone(identifier: "UTC")!
         XCTAssertEqual(Formatting.statusLine(state: makeState(breakIn: 1500), connected: true), "Break in 25:00")

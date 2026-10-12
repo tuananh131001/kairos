@@ -97,6 +97,12 @@ final class AppModel {
         }
     }
 
+    func startBreak() {
+        client.send(.startBreak) { [weak self] reply in
+            MainActor.assumeIsolated { self?.handle(.reply(reply)) }
+        }
+    }
+
     func save(_ settings: KairosSettings, completion: @escaping (Bool) -> Void) {
         client.send(.updateSettings(settings)) { [weak self] reply in
             MainActor.assumeIsolated {

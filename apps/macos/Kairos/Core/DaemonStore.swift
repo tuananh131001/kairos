@@ -7,6 +7,8 @@ struct MenuSnapshot: Equatable {
     var today: String
     var connected: Bool
     var canResume: Bool
+    var canStartBreak: Bool
+    var startBreakTitle: String
     var meetingFallback: Bool
 }
 
@@ -34,6 +36,8 @@ final class DaemonStore {
         today: Formatting.todayLine(nil),
         connected: false,
         canResume: false,
+        canStartBreak: false,
+        startBreakTitle: Formatting.startBreakTitle(state: nil),
         meetingFallback: false
     )
     private(set) var label = LabelSnapshot(
@@ -141,6 +145,8 @@ final class DaemonStore {
             today: Formatting.todayLine(state),
             connected: connected,
             canResume: connected && state?.phase == .paused,
+            canStartBreak: connected && state?.phase == .running,
+            startBreakTitle: Formatting.startBreakTitle(state: liveState),
             meetingFallback: showMeetingFallback
         )
         if menu != nextMenu {
