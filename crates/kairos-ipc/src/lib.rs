@@ -28,6 +28,7 @@ pub enum Request {
     },
     Resume,
     PostponeBreak,
+    StartBreak,
     RestartCapture,
     Shutdown,
 }

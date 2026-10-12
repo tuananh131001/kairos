@@ -103,6 +103,33 @@ final class DaemonStoreTests: XCTestCase {
         XCTAssertEqual(store.label.title, "⏸ 41%")
     }
 
+    func testCanStartBreakOnlyWhileRunningAndConnected() {
+        let store = DaemonStore()
+        store.setConnected(true)
+        store.apply(.state(makeState()))
+        XCTAssertTrue(store.menu.canStartBreak)
+        store.apply(.state(makeState(load: 100, breakIn: 90, postponed: true)))
+        XCTAssertTrue(store.menu.canStartBreak)
+        store.apply(.state(makeState(phase: .onBreak, breakIn: nil, remaining: 400)))
+        XCTAssertFalse(store.menu.canStartBreak)
+        store.apply(.state(makeState(phase: .paused, breakIn: nil, pausedUntil: 0)))
+        XCTAssertFalse(store.menu.canStartBreak)
+        store.apply(.state(makeState()))
+        store.setConnected(false)
+        XCTAssertFalse(store.menu.canStartBreak)
+    }
+
+    func testStartBreakTitleWhilePaused() {
+        let store = DaemonStore()
+        store.setConnected(true)
+        store.apply(.state(makeState()))
+        XCTAssertEqual(store.menu.startBreakTitle, "Start break")
+        store.apply(.state(makeState(phase: .paused, breakIn: nil, pausedUntil: 0)))
+        XCTAssertEqual(store.menu.startBreakTitle, "Start break (in paused)")
+        store.setConnected(false)
+        XCTAssertEqual(store.menu.startBreakTitle, "Start break")
+    }
+
     func testSnapshotsIgnoreSubPercentLoadChanges() {
         let store = DaemonStore()
         store.setConnected(true)

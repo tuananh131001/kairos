@@ -175,6 +175,15 @@ impl<P: Probes, C: Clock, L: AppLauncher> Daemon<P, C, L> {
                     }
                     Err(err) => Err(engine_error(err)),
                 },
+                Request::StartBreak => match self.engine.start_break(now) {
+                    Ok(events) => {
+                        self.handle_engine_events(&events, None, subscribers);
+                        self.checkpoint(now);
+                        log!("manual break started at {:.1}%", self.engine.load_percent());
+                        Ok((Some(self.state(now)), None))
+                    }
+                    Err(err) => Err(engine_error(err)),
+                },
                 Request::RestartCapture => {
                     self.last_permission_check = None;
                     self.refresh_permission(now);
@@ -410,7 +419,7 @@ impl<P: Probes, C: Clock, L: AppLauncher> Daemon<P, C, L> {
             text: self.engine.settings().reminder_text.clone(),
             remaining_s: self
                 .engine
-                .break_remaining_seconds()
+                .break_remaining_seconds(self.clock.now())
                 .map_or(0, |s| s.ceil() as u64),
         }
     }
@@ -476,6 +485,11 @@ fn engine_error(err: EngineError) -> ErrorBody {
         },
         EngineError::NotOnBreak => ErrorBody {
             code: "not_on_break".into(),
+            message: err.to_string(),
+            fields: Vec::new(),
+        },
+        EngineError::NotRunning => ErrorBody {
+            code: "not_running".into(),
             message: err.to_string(),
             fields: Vec::new(),
         },

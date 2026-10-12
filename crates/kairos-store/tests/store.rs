@@ -14,10 +14,10 @@ fn file_database_uses_wal_and_migrates() {
     let path = dir.path().join("nested/kairos.db");
     let store = Store::open(&path).unwrap();
     assert_eq!(store.journal_mode().unwrap(), "wal");
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), 2);
     drop(store);
     let reopened = Store::open(&path).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 1);
+    assert_eq!(reopened.schema_version().unwrap(), 2);
 }
 
 #[test]
@@ -276,4 +276,111 @@ fn meeting_rows_and_pause_link() {
     let pause = store.latest_pause().unwrap().unwrap();
     assert_eq!(pause.meeting_event_id, Some(id));
     assert_eq!(pause.pause.source, PauseSource::MeetingNotification);
+}
+
+#[test]
+fn restart_mid_break_keeps_the_end_time() {
+    let store = Store::open_in_memory().unwrap();
+    let mut engine = Engine::with_state(
+        Settings::default(),
+        EngineState {
+            load_percent: 30.0,
+            last_tick: Some(t(9, 0)),
+            ..EngineState::default()
+        },
+    );
+    store
+        .apply_engine_events(&engine.start_break(t(9, 0)).unwrap(), None)
+        .unwrap();
+    store.checkpoint(engine.state(), t(9, 0)).unwrap();
+    let recovered = store.recover(Settings::default(), t(9, 2)).unwrap();
+    assert!(recovered.events.is_empty());
+    assert_eq!(recovered.engine.phase(), Phase::OnBreak);
+    assert_eq!(
+        recovered.engine.break_remaining_seconds(t(9, 2)),
+        Some(480.0)
+    );
+    assert!((recovered.engine.load_percent() - 10.0).abs() < 0.01);
+    let row = store.latest_break().unwrap().unwrap();
+    assert_eq!(row.planned_seconds, 600);
+    assert_eq!(row.outcome, None);
+}
+
+#[test]
+fn restart_after_the_end_time_completes_the_break_at_the_end_time() {
+    let store = Store::open_in_memory().unwrap();
+    let mut engine = Engine::with_state(
+        Settings::default(),
+        EngineState {
+            last_tick: Some(t(9, 0)),
+            ..EngineState::default()
+        },
+    );
+    store
+        .apply_engine_events(&engine.start_break(t(9, 0)).unwrap(), None)
+        .unwrap();
+    store.checkpoint(engine.state(), t(9, 2)).unwrap();
+    let recovered = store.recover(Settings::default(), t(9, 30)).unwrap();
+    assert_eq!(recovered.engine.phase(), Phase::Running);
+    let row = store.latest_break().unwrap().unwrap();
+    assert_eq!(row.outcome.as_deref(), Some("completed"));
+    assert_eq!(row.ended_at, Some(t(9, 10)));
+}
+
+#[test]
+fn postpone_at_zero_is_saved_as_postponed_and_never_reopened() {
+    let store = Store::open_in_memory().unwrap();
+    let mut engine = Engine::with_state(
+        Settings::default(),
+        EngineState {
+            last_tick: Some(t(9, 0)),
+            ..EngineState::default()
+        },
+    );
+    store
+        .apply_engine_events(&engine.start_break(t(9, 0)).unwrap(), None)
+        .unwrap();
+    let first = store.latest_break().unwrap().unwrap().id;
+    store
+        .apply_engine_events(&engine.postpone(t(9, 1)).unwrap(), None)
+        .unwrap();
+    let mut now = t(9, 1);
+    for _ in 0..(50 * 60 + 600 + 5) {
+        now += TimeDelta::seconds(1);
+        let events = engine.tick(now, ActivityKind::Active);
+        store.apply_engine_events(&events, None).unwrap();
+    }
+    let row = store.break_event(first).unwrap().unwrap();
+    assert_eq!(row.outcome.as_deref(), Some("postponed"));
+    assert_eq!(row.ended_at, Some(t(9, 1)));
+    assert_eq!(row.postpone_count, 1);
+    let next = store.latest_break().unwrap().unwrap();
+    assert_ne!(next.id, first);
+    assert_eq!(next.outcome.as_deref(), Some("completed"));
+    assert_eq!(next.postpone_count, 0);
+}
+
+#[test]
+fn upgrading_mid_break_derives_the_end_time_from_the_meter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kairos.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "ALTER TABLE engine_state DROP COLUMN break_ends_at;
+         ALTER TABLE engine_state DROP COLUMN break_length_seconds;
+         PRAGMA user_version = 1;
+         INSERT INTO engine_state (id, load_percent, phase, checkpointed_at,
+             break_chain_started_at, postpone_count)
+         VALUES (1, 40.0, 'on_break', {0}, {0}, 0);",
+        t(9, 0).timestamp_millis()
+    ))
+    .unwrap();
+    drop(conn);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 2);
+    let stored = store.load_engine_state().unwrap().unwrap();
+    let active = stored.state.active_break.unwrap();
+    assert_eq!(active.ends_at, t(9, 4));
+    assert_eq!(active.length_seconds, 600);
 }

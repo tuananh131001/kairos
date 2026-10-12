@@ -2,15 +2,16 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
 use kairos_core::{
-    ActivePause, ActivityKind, BreakChain, BreakEndReason, Engine, EngineEvent, EngineState,
-    PausePreset, PauseSource, Phase, Settings, Timestamp,
+    ActiveBreak, ActivePause, ActivityKind, BreakChain, BreakEndReason, Engine, EngineEvent,
+    EngineState, PausePreset, PauseSource, Phase, Settings, Timestamp,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub use rusqlite::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     work_minutes INTEGER NOT NULL,
@@ -65,7 +66,18 @@ CREATE TABLE pause (
     source TEXT NOT NULL CHECK (source IN ('menu', 'meeting_notification')),
     meeting_event_id INTEGER REFERENCES meeting_event (id)
 );
-"#];
+"#,
+    r#"
+ALTER TABLE engine_state ADD COLUMN break_ends_at INTEGER;
+ALTER TABLE engine_state ADD COLUMN break_length_seconds INTEGER;
+UPDATE engine_state SET
+    break_length_seconds = COALESCE((SELECT break_seconds FROM settings WHERE id = 1), 600),
+    break_ends_at = checkpointed_at + CAST(
+        load_percent / 100.0 * COALESCE((SELECT break_seconds FROM settings WHERE id = 1), 600)
+        * 1000 AS INTEGER)
+WHERE phase = 'on_break';
+"#,
+];
 
 pub struct Store {
     conn: Connection,
@@ -213,15 +225,17 @@ impl Store {
         let checkpointed_at = state.last_tick.unwrap_or(now);
         self.conn.execute(
             "INSERT INTO engine_state (id, load_percent, phase, not_before, checkpointed_at,
-                 break_chain_started_at, postpone_count)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+                 break_chain_started_at, postpone_count, break_ends_at, break_length_seconds)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (id) DO UPDATE SET
                  load_percent = excluded.load_percent,
                  phase = excluded.phase,
                  not_before = excluded.not_before,
                  checkpointed_at = excluded.checkpointed_at,
                  break_chain_started_at = excluded.break_chain_started_at,
-                 postpone_count = excluded.postpone_count",
+                 postpone_count = excluded.postpone_count,
+                 break_ends_at = excluded.break_ends_at,
+                 break_length_seconds = excluded.break_length_seconds",
             params![
                 state.load_percent,
                 state.phase.as_str(),
@@ -229,6 +243,8 @@ impl Store {
                 ms(checkpointed_at),
                 opt_ms(state.break_chain.as_ref().map(|c| c.started_at)),
                 state.break_chain.as_ref().map_or(0, |c| c.postpone_count),
+                opt_ms(state.active_break.as_ref().map(|b| b.ends_at)),
+                state.active_break.as_ref().map(|b| b.length_seconds),
             ],
         )?;
         Ok(())
@@ -239,7 +255,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT load_percent, phase, not_before, checkpointed_at,
-                        break_chain_started_at, postpone_count
+                        break_chain_started_at, postpone_count, break_ends_at,
+                        break_length_seconds
                  FROM engine_state WHERE id = 1",
                 [],
                 |r| {
@@ -247,6 +264,8 @@ impl Store {
                     let phase = Phase::parse(&phase).ok_or_else(|| invalid(1, "phase"))?;
                     let chain_started: Option<i64> = r.get(4)?;
                     let checkpointed_at = from_ms(r.get(3)?);
+                    let break_ends_at: Option<i64> = r.get(6)?;
+                    let break_length: Option<u32> = r.get(7)?;
                     Ok(StoredEngine {
                         state: EngineState {
                             load_percent: r.get(0)?,
@@ -258,6 +277,12 @@ impl Store {
                                 started_at: from_ms(started),
                                 postpone_count: r.get(5).unwrap_or(0),
                             }),
+                            active_break: break_ends_at.zip(break_length).map(
+                                |(ends_at, length_seconds)| ActiveBreak {
+                                    ends_at: from_ms(ends_at),
+                                    length_seconds,
+                                },
+                            ),
                         },
                         checkpointed_at,
                     })
@@ -330,8 +355,8 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT id FROM break_event
-                 WHERE outcome IS NULL OR outcome = 'postponed'
-                 ORDER BY id DESC LIMIT 1",
+                 WHERE id = (SELECT MAX(id) FROM break_event)
+                   AND (outcome IS NULL OR outcome = 'postponed')",
                 [],
                 |r| r.get(0),
             )

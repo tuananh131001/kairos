@@ -29,8 +29,8 @@ The user has the ability to:
    - While a break is postponed, it shows **100 % in red** and does not exceed 100 %.
    - While paused, it shows `⏸ NN%`, frozen.
 5. **Get a full-screen break overlay** on every display when the meter reaches 100 %.
-   - It shows the reminder text and a `mm:ss` countdown, which is the time left for the meter to drain to 0 %.
-   - It closes automatically at 0 %.
+   - It shows the reminder text and a `mm:ss` countdown to the break's end time (start + break length). See [ADR 0001](../adr/0001-breaks-end-at-a-fixed-end-time.md).
+   - It closes automatically at the end time. The meter drains to 0 % during the break and stays there.
 6. **Postpone a break** with the only overlay button, **Postpone 5 min**. The overlay closes and the break comes back when the meter is ≥ 100 % again, but **never sooner than 5 minutes** after the click. Rest already taken counts, so postponing at 40 % brings the break back once the meter climbs back to 100 %.
 7. **Pause Kairos** from the menu for **30 minutes, 2 hours, 4 hours or 1 day (24 h from the click)**, and **Resume** early at any time.
    - While paused there is no counting, no recording, no screen sampling, no meeting notifications and no breaks.
@@ -169,12 +169,15 @@ erDiagram
 |---|---|---|
 | running, Active or Watching | `+100 / (work_minutes × 60)` | capped at 100 |
 | running, Away | `−100 / break_seconds` | floored at 0 |
-| on_break (any activity) | `−100 / break_seconds` | at 0 → break completed → running |
+| on_break (any activity) | `−100 / break length at break start` | floored at 0; at the end time → break completed → running |
 | paused | 0 | frozen |
 
 - **Break trigger:** `phase = running AND load ≥ 100 AND (not_before IS NULL OR now ≥ not_before)`.
 - **Postpone:** `phase → running`, `not_before = now + 5 min`, `postpone_count += 1`.
-- **Countdown shown on the overlay:** `load / 100 × break_seconds`.
+- **Postpone at 0 %:** `phase → running`, `postpone_count += 1`, the break is closed as postponed and does not return.
+- **Start break (manual):** only when `phase = running` (postponed included). The meter is unchanged, the end time is `now + break_seconds`, and a postponed break is resumed with its postpone count.
+- **Break end time:** `break start + break_seconds`, fixed when the break starts and saved with the engine state.
+- **Countdown shown on the overlay:** `end time − now`.
 - **"Break in" shown in the dropdown:** `max((100 − load) / rise_rate, not_before − now)`.
 
 ## High-level diagram
@@ -226,8 +229,9 @@ stateDiagram-v2
     [*] --> Running
     Running --> Running: tick, load rises if Active or Watching, falls if Away
     Running --> OnBreak: load reaches 100 and now is past not_before
-    OnBreak --> OnBreak: tick, load drains by 100 / break_seconds
-    OnBreak --> Running: load reaches 0, break completed
+    Running --> OnBreak: Start break from the menu
+    OnBreak --> OnBreak: tick, load drains by 100 / break length, floored at 0
+    OnBreak --> Running: end time reached, break completed
     OnBreak --> Running: Postpone, not_before = now + 5 min
     Running --> Paused: pause preset chosen
     OnBreak --> Paused: pause preset chosen, break cancelled
@@ -241,10 +245,10 @@ sequenceDiagram
     participant A as Kairos.app
     participant U as User
     E->>E: load reaches 100 percent
-    E->>A: BreakStarted(text, remaining 10:00)
+    E->>A: BreakStarted(text, remaining 10:00, end time = now + 10:00)
     A->>U: full-screen overlay on all displays
     alt user rests the full break
-        E->>A: BreakEnded(completed), load 0 percent
+        E->>A: BreakEnded(completed) at the end time, load 0 percent
         A->>U: hide overlay
     else user postpones at 06:00 left (load 60 percent)
         U->>A: click Postpone 5 min
