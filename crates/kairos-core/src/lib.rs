@@ -10,8 +10,8 @@ pub use classifier::{
     MOTION_WINDOW,
 };
 pub use engine::{
-    ActivePause, BreakChain, BreakEndReason, Engine, EngineError, EngineEvent, EngineState,
-    Snapshot, POSTPONE_SECONDS, TICK_GAP_SECONDS,
+    ActiveBreak, ActivePause, BreakChain, BreakEndReason, Engine, EngineError, EngineEvent,
+    EngineState, Snapshot, POSTPONE_SECONDS, TICK_GAP_SECONDS,
 };
 pub use meeting::{AvState, MeetingDetector, MeetingEvent, MEETING_GAP_SECONDS};
 pub use recorder::{ActivityRecorder, SegmentOp};

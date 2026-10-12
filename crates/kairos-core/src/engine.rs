@@ -19,6 +19,18 @@ pub struct ActivePause {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActiveBreak {
+    pub ends_at: Timestamp,
+    pub length_seconds: u32,
+}
+
+impl ActiveBreak {
+    fn drain_per_second(&self) -> f64 {
+        FULL / f64::from(self.length_seconds.max(1))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BreakChain {
     pub started_at: Timestamp,
     pub postpone_count: u32,
@@ -32,6 +44,7 @@ pub struct EngineState {
     pub last_tick: Option<Timestamp>,
     pub pause: Option<ActivePause>,
     pub break_chain: Option<BreakChain>,
+    pub active_break: Option<ActiveBreak>,
 }
 
 impl Default for EngineState {
@@ -43,6 +56,7 @@ impl Default for EngineState {
             last_tick: None,
             pause: None,
             break_chain: None,
+            active_break: None,
         }
     }
 }
@@ -50,7 +64,7 @@ impl Default for EngineState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum BreakEndReason {
     Completed,
-    Postponed { not_before: Timestamp },
+    Postponed { not_before: Option<Timestamp> },
     CancelledByPause,
 }
 
@@ -79,6 +93,7 @@ pub enum EngineEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineError {
     NotOnBreak,
+    NotRunning,
     NotPaused,
     InvalidSettings(Vec<FieldError>),
 }
@@ -87,6 +102,7 @@ impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineError::NotOnBreak => write!(f, "no break in progress"),
+            EngineError::NotRunning => write!(f, "not running"),
             EngineError::NotPaused => write!(f, "not paused"),
             EngineError::InvalidSettings(errors) => {
                 let joined: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
@@ -178,67 +194,101 @@ impl Engine {
             from = pause.until_at.max(last);
         }
         let effective = if gap { ActivityKind::Away } else { activity };
-        let dt = seconds_between(from, now);
-        self.advance(now, dt, effective, &mut events);
+        self.advance(from, now, effective, &mut events);
         self.state.last_tick = Some(now);
         events
     }
 
     fn advance(
         &mut self,
+        from: Timestamp,
         now: Timestamp,
-        dt: f64,
         activity: ActivityKind,
         events: &mut Vec<EngineEvent>,
     ) {
         match self.state.phase {
             Phase::Paused => {}
             Phase::Running => {
-                let delta = if activity.is_working() {
-                    self.settings.rise_per_second() * dt
-                } else {
-                    -self.settings.fall_per_second() * dt
-                };
-                self.state.load_percent = (self.state.load_percent + delta).clamp(0.0, FULL);
-                if self.state.load_percent <= EPSILON {
-                    self.state.load_percent = 0.0;
-                    if let Some(chain) = self.state.break_chain.take() {
-                        self.state.not_before = None;
-                        events.push(EngineEvent::BreakEnded {
-                            at: now,
-                            reason: BreakEndReason::Completed,
-                            postpone_count: chain.postpone_count,
-                        });
-                    }
-                }
-                if self.state.load_percent >= FULL - EPSILON
-                    && self.state.not_before.is_none_or(|nb| now >= nb)
-                {
-                    events.push(self.start_break(now));
-                }
+                self.advance_running(seconds_between(from, now), now, activity, events)
             }
             Phase::OnBreak => {
-                let delta = self.settings.fall_per_second() * dt;
-                self.state.load_percent = (self.state.load_percent - delta).max(0.0);
-                if self.state.load_percent <= EPSILON {
-                    self.state.load_percent = 0.0;
-                    self.state.phase = Phase::Running;
-                    self.state.not_before = None;
-                    let chain = self.state.break_chain.take();
-                    events.push(EngineEvent::BreakEnded {
-                        at: now,
-                        reason: BreakEndReason::Completed,
-                        postpone_count: chain.map_or(0, |c| c.postpone_count),
-                    });
+                let ends_at = match &self.state.active_break {
+                    Some(active) => {
+                        let until = now.min(active.ends_at);
+                        let drained = active.drain_per_second() * seconds_between(from, until);
+                        self.state.load_percent =
+                            (self.state.load_percent - drained.max(0.0)).max(0.0);
+                        if self.state.load_percent <= EPSILON {
+                            self.state.load_percent = 0.0;
+                        }
+                        active.ends_at
+                    }
+                    None => from,
+                };
+                if now < ends_at {
+                    return;
+                }
+                self.end_break(ends_at, events);
+                let rest = seconds_between(ends_at.max(from), now);
+                if rest > 0.0 {
+                    self.advance_running(rest, now, activity, events);
                 }
             }
         }
     }
 
-    fn start_break(&mut self, now: Timestamp) -> EngineEvent {
-        self.state.load_percent = FULL;
+    fn advance_running(
+        &mut self,
+        dt: f64,
+        now: Timestamp,
+        activity: ActivityKind,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        let delta = if activity.is_working() {
+            self.settings.rise_per_second() * dt
+        } else {
+            -self.settings.fall_per_second() * dt
+        };
+        self.state.load_percent = (self.state.load_percent + delta).clamp(0.0, FULL);
+        if self.state.load_percent <= EPSILON {
+            self.state.load_percent = 0.0;
+            if let Some(chain) = self.state.break_chain.take() {
+                self.state.not_before = None;
+                events.push(EngineEvent::BreakEnded {
+                    at: now,
+                    reason: BreakEndReason::Completed,
+                    postpone_count: chain.postpone_count,
+                });
+            }
+        }
+        if self.state.load_percent >= FULL - EPSILON
+            && self.state.not_before.is_none_or(|nb| now >= nb)
+        {
+            self.state.load_percent = FULL;
+            events.push(self.begin_break(now));
+        }
+    }
+
+    fn end_break(&mut self, at: Timestamp, events: &mut Vec<EngineEvent>) {
+        self.state.phase = Phase::Running;
+        self.state.not_before = None;
+        self.state.active_break = None;
+        let chain = self.state.break_chain.take();
+        events.push(EngineEvent::BreakEnded {
+            at,
+            reason: BreakEndReason::Completed,
+            postpone_count: chain.map_or(0, |c| c.postpone_count),
+        });
+    }
+
+    fn begin_break(&mut self, now: Timestamp) -> EngineEvent {
+        let length_seconds = self.settings.break_seconds;
         self.state.phase = Phase::OnBreak;
         self.state.not_before = None;
+        self.state.active_break = Some(ActiveBreak {
+            ends_at: now + TimeDelta::seconds(i64::from(length_seconds)),
+            length_seconds,
+        });
         let resumed_chain = self.state.break_chain.is_some();
         let chain = self.state.break_chain.get_or_insert(BreakChain {
             started_at: now,
@@ -246,27 +296,41 @@ impl Engine {
         });
         EngineEvent::BreakStarted {
             at: now,
-            remaining_s: u64::from(self.settings.break_seconds),
+            remaining_s: u64::from(length_seconds),
             chain_started_at: chain.started_at,
             postpone_count: chain.postpone_count,
             resumed_chain,
         }
     }
 
+    pub fn start_break(&mut self, now: Timestamp) -> Result<Vec<EngineEvent>, EngineError> {
+        if self.state.phase != Phase::Running {
+            return Err(EngineError::NotRunning);
+        }
+        self.state.last_tick = Some(now);
+        Ok(vec![self.begin_break(now)])
+    }
+
     pub fn postpone(&mut self, now: Timestamp) -> Result<Vec<EngineEvent>, EngineError> {
         if self.state.phase != Phase::OnBreak {
             return Err(EngineError::NotOnBreak);
         }
-        let not_before = now + TimeDelta::seconds(POSTPONE_SECONDS);
         self.state.phase = Phase::Running;
-        self.state.not_before = Some(not_before);
+        self.state.active_break = None;
+        self.state.last_tick = Some(now);
         let chain = self.state.break_chain.get_or_insert(BreakChain {
             started_at: now,
             postpone_count: 0,
         });
         chain.postpone_count += 1;
         let postpone_count = chain.postpone_count;
-        self.state.last_tick = Some(now);
+        let not_before = if self.state.load_percent <= EPSILON {
+            self.state.break_chain = None;
+            None
+        } else {
+            Some(now + TimeDelta::seconds(POSTPONE_SECONDS))
+        };
+        self.state.not_before = not_before;
         Ok(vec![EngineEvent::BreakEnded {
             at: now,
             reason: BreakEndReason::Postponed { not_before },
@@ -314,6 +378,7 @@ impl Engine {
         };
         self.state.phase = Phase::Paused;
         self.state.not_before = None;
+        self.state.active_break = None;
         self.state.load_percent = frozen;
         self.state.pause = Some(pause.clone());
         self.state.last_tick = Some(now);
@@ -341,6 +406,7 @@ impl Engine {
         self.state.load_percent = load;
         self.state.not_before = None;
         self.state.break_chain = None;
+        self.state.active_break = None;
         EngineEvent::PauseEnded {
             at,
             early,
@@ -366,9 +432,12 @@ impl Engine {
         Some(to_full.max(floor))
     }
 
-    pub fn break_remaining_seconds(&self) -> Option<f64> {
-        (self.state.phase == Phase::OnBreak)
-            .then(|| self.state.load_percent / FULL * f64::from(self.settings.break_seconds))
+    pub fn break_remaining_seconds(&self, now: Timestamp) -> Option<f64> {
+        if self.state.phase != Phase::OnBreak {
+            return None;
+        }
+        let ends_at = self.state.active_break.as_ref().map_or(now, |b| b.ends_at);
+        Some(seconds_between(now, ends_at).max(0.0))
     }
 
     pub fn snapshot(&self, now: Timestamp) -> Snapshot {
@@ -376,7 +445,7 @@ impl Engine {
             phase: self.state.phase,
             load_percent: self.state.load_percent,
             break_in_s: self.break_in_seconds(now),
-            break_remaining_s: self.break_remaining_seconds(),
+            break_remaining_s: self.break_remaining_seconds(now),
             postponed: self.is_postponed(),
             paused_until: self.state.pause.as_ref().map(|p| p.until_at),
         }

@@ -223,7 +223,7 @@ fn b1_break_starts_when_meter_reaches_100() {
         [EngineEvent::BreakStarted { remaining_s, .. }] => assert_eq!(*remaining_s, 600),
         other => panic!("unexpected {other:?}"),
     }
-    assert_close(engine.break_remaining_seconds().unwrap(), 600.0);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 600.0);
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn b5_postpone_at_40_percent_waits_for_full_meter() {
     run(&mut engine, &mut clock, 1, ActivityKind::Active);
     run(&mut engine, &mut clock, 360, ActivityKind::Active);
     assert_close(engine.load_percent(), 40.0);
-    assert_close(engine.break_remaining_seconds().unwrap(), 240.0);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 240.0);
     engine.postpone(clock.now).unwrap();
     let before = run(&mut engine, &mut clock, 30 * 60 - 2, ActivityKind::Active);
     assert!(break_started(&before).is_empty());
@@ -340,6 +340,281 @@ fn postponed_break_resolved_by_resting_to_zero() {
             ..
         }
     )));
+}
+
+fn completed(events: &[EngineEvent]) -> Vec<&EngineEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                EngineEvent::BreakEnded {
+                    reason: BreakEndReason::Completed,
+                    ..
+                }
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn manual_break_at_30_percent_drains_to_zero_and_lasts_the_break_length() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 30.0);
+    let events = engine.start_break(clock.now).unwrap();
+    match &events[..] {
+        [EngineEvent::BreakStarted {
+            remaining_s,
+            postpone_count,
+            resumed_chain,
+            ..
+        }] => {
+            assert_eq!(*remaining_s, 600);
+            assert_eq!(*postpone_count, 0);
+            assert!(!*resumed_chain);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(engine.phase(), Phase::OnBreak);
+    assert_eq!(engine.load_percent(), 30.0);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 600.0);
+
+    let drained = run(&mut engine, &mut clock, 180, ActivityKind::Active);
+    assert!(drained.is_empty());
+    assert_eq!(engine.load_percent(), 0.0);
+    assert_eq!(engine.phase(), Phase::OnBreak);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 420.0);
+
+    let resting = run(&mut engine, &mut clock, 419, ActivityKind::Active);
+    assert!(resting.is_empty());
+    assert_eq!(engine.load_percent(), 0.0);
+    let end = run(&mut engine, &mut clock, 1, ActivityKind::Active);
+    assert_eq!(completed(&end).len(), 1);
+    assert_eq!(engine.phase(), Phase::Running);
+    assert_eq!(engine.break_remaining_seconds(clock.now), None);
+}
+
+#[test]
+fn manual_break_at_zero_lasts_the_break_length() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 0.0);
+    engine.start_break(clock.now).unwrap();
+    let before = run(&mut engine, &mut clock, 599, ActivityKind::Away);
+    assert!(before.is_empty());
+    assert_eq!(engine.phase(), Phase::OnBreak);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 1.0);
+    let end = run(&mut engine, &mut clock, 1, ActivityKind::Away);
+    assert_eq!(completed(&end).len(), 1);
+    assert_eq!(engine.phase(), Phase::Running);
+    assert_eq!(engine.load_percent(), 0.0);
+}
+
+#[test]
+fn scheduled_break_still_lasts_the_break_length_and_ends_at_zero() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 99.99);
+    run(&mut engine, &mut clock, 1, ActivityKind::Active);
+    assert_eq!(engine.load_percent(), 100.0);
+    run(&mut engine, &mut clock, 300, ActivityKind::Active);
+    assert_close(engine.load_percent(), 50.0);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 300.0);
+    let before = run(&mut engine, &mut clock, 299, ActivityKind::Active);
+    assert!(before.is_empty());
+    let end = run(&mut engine, &mut clock, 1, ActivityKind::Active);
+    assert_eq!(completed(&end).len(), 1);
+    assert_eq!(engine.load_percent(), 0.0);
+    assert_eq!(engine.phase(), Phase::Running);
+}
+
+#[test]
+fn start_break_is_refused_while_paused_or_on_break() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 50.0);
+    engine.pause(clock.now, PausePreset::M30, PauseSource::Menu);
+    assert_eq!(engine.start_break(clock.now), Err(EngineError::NotRunning));
+    assert_eq!(engine.phase(), Phase::Paused);
+    clock.advance(60);
+    engine.resume(clock.now).unwrap();
+    engine.start_break(clock.now).unwrap();
+    assert_eq!(engine.start_break(clock.now), Err(EngineError::NotRunning));
+    assert_eq!(engine.phase(), Phase::OnBreak);
+}
+
+#[test]
+fn start_break_while_postponed_resumes_the_chain() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 99.99);
+    run(&mut engine, &mut clock, 1, ActivityKind::Active);
+    engine.postpone(clock.now).unwrap();
+    let waiting = run(&mut engine, &mut clock, 120, ActivityKind::Active);
+    assert!(break_started(&waiting).is_empty());
+    assert!(engine.is_postponed());
+    let events = engine.start_break(clock.now).unwrap();
+    match &events[..] {
+        [EngineEvent::BreakStarted {
+            remaining_s,
+            postpone_count,
+            resumed_chain,
+            ..
+        }] => {
+            assert_eq!(*remaining_s, 600);
+            assert_eq!(*postpone_count, 1);
+            assert!(*resumed_chain);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(engine.phase(), Phase::OnBreak);
+    assert!(!engine.is_postponed());
+    assert_eq!(engine.state().not_before, None);
+}
+
+#[test]
+fn postponing_a_manual_break_early_waits_for_a_full_meter() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 30.0);
+    engine.start_break(clock.now).unwrap();
+    run(&mut engine, &mut clock, 60, ActivityKind::Active);
+    assert_close(engine.load_percent(), 20.0);
+    let events = engine.postpone(clock.now).unwrap();
+    assert!(matches!(
+        events[..],
+        [EngineEvent::BreakEnded {
+            reason: BreakEndReason::Postponed {
+                not_before: Some(_)
+            },
+            postpone_count: 1,
+            ..
+        }]
+    ));
+    assert!(engine.is_postponed());
+    assert_close(engine.break_in_seconds(clock.now).unwrap(), 40.0 * 60.0);
+    let before = run(&mut engine, &mut clock, 40 * 60 - 2, ActivityKind::Active);
+    assert!(break_started(&before).is_empty());
+    let after = run(&mut engine, &mut clock, 4, ActivityKind::Active);
+    match break_started(&after)[..] {
+        [EngineEvent::BreakStarted {
+            postpone_count,
+            resumed_chain,
+            ..
+        }] => {
+            assert_eq!(*postpone_count, 1);
+            assert!(*resumed_chain);
+        }
+        ref other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn postpone_at_zero_closes_the_break_as_postponed() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 30.0);
+    engine.start_break(clock.now).unwrap();
+    run(&mut engine, &mut clock, 300, ActivityKind::Away);
+    assert_eq!(engine.load_percent(), 0.0);
+    let events = engine.postpone(clock.now).unwrap();
+    assert!(matches!(
+        events[..],
+        [EngineEvent::BreakEnded {
+            reason: BreakEndReason::Postponed { not_before: None },
+            postpone_count: 1,
+            ..
+        }]
+    ));
+    assert_eq!(engine.phase(), Phase::Running);
+    assert!(!engine.is_postponed());
+    assert_eq!(engine.state().not_before, None);
+    assert_close(engine.break_in_seconds(clock.now).unwrap(), 50.0 * 60.0);
+
+    let away = run(&mut engine, &mut clock, 60, ActivityKind::Away);
+    assert!(away.is_empty());
+    let later = run(&mut engine, &mut clock, 50 * 60 + 1, ActivityKind::Active);
+    assert!(completed(&later).is_empty());
+    match break_started(&later)[..] {
+        [EngineEvent::BreakStarted {
+            postpone_count,
+            resumed_chain,
+            ..
+        }] => {
+            assert_eq!(*postpone_count, 0);
+            assert!(!*resumed_chain);
+        }
+        ref other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn changing_break_length_mid_break_keeps_end_time_and_drain_rate() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 99.99);
+    run(&mut engine, &mut clock, 1, ActivityKind::Active);
+    run(&mut engine, &mut clock, 120, ActivityKind::Active);
+    assert_close(engine.load_percent(), 80.0);
+    engine
+        .apply_settings(Settings {
+            break_seconds: 300,
+            ..Settings::default()
+        })
+        .unwrap();
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 480.0);
+    run(&mut engine, &mut clock, 60, ActivityKind::Active);
+    assert_close(engine.load_percent(), 70.0);
+    assert_close(engine.break_remaining_seconds(clock.now).unwrap(), 420.0);
+    let before = run(&mut engine, &mut clock, 419, ActivityKind::Active);
+    assert!(before.is_empty());
+    let end = run(&mut engine, &mut clock, 1, ActivityKind::Active);
+    assert_eq!(completed(&end).len(), 1);
+
+    let next = run(&mut engine, &mut clock, 50 * 60 + 1, ActivityKind::Active);
+    match break_started(&next)[..] {
+        [EngineEvent::BreakStarted { remaining_s, .. }] => assert_eq!(*remaining_s, 300),
+        ref other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn tick_after_sleeping_past_the_end_time_ends_the_break_at_the_end_time() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 30.0);
+    let started_at = clock.now;
+    engine.start_break(started_at).unwrap();
+    run(&mut engine, &mut clock, 120, ActivityKind::Active);
+    let now = clock.advance(13 * 60);
+    let events = engine.tick(now, ActivityKind::Active);
+    match &events[..] {
+        [EngineEvent::BreakEnded {
+            at,
+            reason: BreakEndReason::Completed,
+            ..
+        }] => assert_eq!(*at, started_at + TimeDelta::minutes(10)),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(engine.phase(), Phase::Running);
+    assert_eq!(engine.load_percent(), 0.0);
+}
+
+#[test]
+fn pause_during_manual_break_cancels_it_and_freezes_the_meter() {
+    let mut clock = FakeClock::new();
+    let mut engine = started_engine(&clock, 30.0);
+    engine.start_break(clock.now).unwrap();
+    run(&mut engine, &mut clock, 60, ActivityKind::Away);
+    let events = engine.pause(clock.now, PausePreset::M30, PauseSource::Menu);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EngineEvent::BreakEnded {
+            reason: BreakEndReason::CancelledByPause,
+            ..
+        }
+    )));
+    assert_eq!(engine.phase(), Phase::Paused);
+    assert_eq!(engine.break_remaining_seconds(clock.now), None);
+    run(&mut engine, &mut clock, 600, ActivityKind::Away);
+    assert_close(engine.load_percent(), 20.0);
+    let now = clock.advance(20 * 60);
+    let resumed = engine.tick(now, ActivityKind::Active);
+    assert!(break_started(&resumed).is_empty());
+    assert_eq!(engine.phase(), Phase::Running);
+    assert_close(engine.load_percent(), 20.0);
 }
 
 #[test]
