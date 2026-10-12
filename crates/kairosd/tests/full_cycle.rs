@@ -544,3 +544,185 @@ async fn rejects_garbage_and_second_instance() {
         .unwrap()
         .unwrap();
 }
+
+fn error_code(event: &Event) -> Option<String> {
+    match event {
+        Event::Reply {
+            ok: false,
+            error: Some(error),
+            ..
+        } => Some(error.code.clone()),
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn start_break_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("kairosd.sock");
+    let db = dir.path().join("kairos.db");
+    let world: Shared = Arc::new(Mutex::new(World {
+        now: Some(Utc.with_ymd_and_hms(2026, 3, 10, 9, 0, 0).unwrap()),
+        permission: true,
+        ..World::default()
+    }));
+    let daemon = Daemon::new(
+        kairos_store::Store::open(&db).unwrap(),
+        FakeProbes(world.clone()),
+        FakeClock(world.clone()),
+        FakeLauncher(world.clone()),
+    )
+    .unwrap();
+    let listener = bind_socket(&socket).unwrap();
+    let (tick_tx, tick_rx) = mpsc::channel(1);
+    let server = tokio::spawn(run(daemon, listener, tick_rx, std::future::pending()));
+    let h = Harness {
+        world: world.clone(),
+        ticks: tick_tx,
+    };
+    let mut client = Client::connect(&socket).await;
+    client.request(Request::Subscribe).await;
+    client
+        .request(Request::UpdateSettings {
+            settings: Settings {
+                work_minutes: 1,
+                break_seconds: 20,
+                reminder_text: "Look away 👀".into(),
+                ..Settings::default()
+            },
+        })
+        .await;
+    h.tick(15).await;
+    client.drain().await;
+
+    let started = client.request(Request::StartBreak).await;
+    let state = state_of(&started);
+    assert_eq!(state.phase, PhaseLabel::OnBreak);
+    assert_eq!(state.break_remaining_s, Some(20));
+    assert!(
+        state.load_percent > 20.0 && state.load_percent < 25.0,
+        "{}",
+        state.load_percent
+    );
+    let event = client
+        .expect("break", |e| matches!(e, Event::BreakStarted { .. }))
+        .await;
+    assert_eq!(
+        event,
+        Event::BreakStarted {
+            text: "Look away 👀".into(),
+            remaining_s: 20
+        }
+    );
+    let again = client.request(Request::StartBreak).await;
+    assert_eq!(error_code(&again).as_deref(), Some("not_running"));
+
+    h.tick(19).await;
+    let events = client.drain().await;
+    assert!(!events.iter().any(|e| matches!(e, Event::BreakEnded { .. })));
+    let state = state_of(
+        events
+            .iter()
+            .rev()
+            .find(|e| matches!(e, Event::State(_)))
+            .unwrap(),
+    );
+    assert_eq!(state.phase, PhaseLabel::OnBreak);
+    assert_eq!(state.load_percent, 0.0);
+    assert_eq!(state.break_remaining_s, Some(1));
+    h.tick(1).await;
+    client
+        .expect("completed", |e| {
+            matches!(
+                e,
+                Event::BreakEnded {
+                    reason: BreakEndReasonLabel::Completed
+                }
+            )
+        })
+        .await;
+    client.drain().await;
+
+    client
+        .request(Request::Pause {
+            preset: PausePreset::M30,
+            source: PauseSource::Menu,
+        })
+        .await;
+    let paused = client.request(Request::StartBreak).await;
+    assert_eq!(error_code(&paused).as_deref(), Some("not_running"));
+    client.request(Request::Resume).await;
+
+    let started = client.request(Request::StartBreak).await;
+    assert_eq!(state_of(&started).phase, PhaseLabel::OnBreak);
+    client
+        .expect("second break", |e| matches!(e, Event::BreakStarted { .. }))
+        .await;
+    h.tick(2).await;
+    let postponed = client.request(Request::PostponeBreak).await;
+    let state = state_of(&postponed);
+    assert_eq!(state.phase, PhaseLabel::Running);
+    assert!(!state.postponed);
+    client
+        .expect("postponed", |e| {
+            matches!(
+                e,
+                Event::BreakEnded {
+                    reason: BreakEndReasonLabel::Postponed
+                }
+            )
+        })
+        .await;
+    assert_eq!(world.lock().unwrap().launches, 0);
+
+    client.request(Request::Shutdown).await;
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .expect("daemon did not exit")
+        .unwrap();
+    let store = kairos_store::Store::open(&db).unwrap();
+    let first = store.break_event(1).unwrap().unwrap();
+    assert_eq!(first.outcome.as_deref(), Some("completed"));
+    assert_eq!(first.planned_seconds, 20);
+    let second = store.break_event(2).unwrap().unwrap();
+    assert_eq!(second.outcome.as_deref(), Some("postponed"));
+    assert_eq!(second.postpone_count, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restart_restores_break_end_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("kairos.db");
+    let world: Shared = Arc::new(Mutex::new(World {
+        now: Some(Utc.with_ymd_and_hms(2026, 3, 10, 9, 0, 0).unwrap()),
+        permission: true,
+        ..World::default()
+    }));
+    let make = || {
+        Daemon::new(
+            kairos_store::Store::open(&db).unwrap(),
+            FakeProbes(world.clone()),
+            FakeClock(world.clone()),
+            FakeLauncher(world.clone()),
+        )
+        .unwrap()
+    };
+    let mut daemon = make();
+    for _ in 0..600 {
+        advance(&world, TimeDelta::seconds(1));
+        daemon.tick(1);
+    }
+    let outcome = daemon.handle(Request::StartBreak, 1);
+    assert_eq!(state_of(&outcome.reply).break_remaining_s, Some(600));
+    for _ in 0..60 {
+        advance(&world, TimeDelta::seconds(1));
+        daemon.tick(1);
+    }
+    assert_eq!(daemon.current_state().break_remaining_s, Some(540));
+    drop(daemon);
+    advance(&world, TimeDelta::minutes(2));
+    let mut restored = make();
+    let state = restored.current_state();
+    assert_eq!(state.phase, PhaseLabel::OnBreak);
+    assert_eq!(state.break_remaining_s, Some(420));
+}

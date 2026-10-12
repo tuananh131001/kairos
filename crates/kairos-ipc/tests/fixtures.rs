@@ -17,7 +17,7 @@ fn fixtures() -> Vec<(String, String)> {
         })
         .collect();
     out.sort();
-    assert!(out.len() >= 18);
+    assert!(out.len() >= 19);
     out
 }
 
